@@ -1,7 +1,14 @@
 #include <Adafruit_TinyUSB.h>
 #include "utils.h"
 
-//#define DEBUG
+
+/*
+By Szabolcs2008 (https://github.com/Szabolcs2008)
+
+Plug and pray
+
+Add #define DEBUG for Serial prints (probably wont work but you can try) 
+*/
 
 #define DAT 14
 #define CLK 15
@@ -12,6 +19,7 @@
 Adafruit_USBD_HID usb_hid;
 
 
+bool isConnected = true;
 
 uint8_t const desc_hid_report[] = { TUD_HID_REPORT_DESC_KEYBOARD() };
 
@@ -80,6 +88,8 @@ void hid_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8
   (void) report_id;
   (void) bufsize;
 
+  // if (!isConnected) return; // keyboard is not connected (avoid hanging)
+
   // LED indicator is output report with only 1 byte length
   if (report_type != HID_REPORT_TYPE_OUTPUT) return;
 
@@ -99,7 +109,11 @@ void hid_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8
     ps2_leds |= 1;
   } 
   if (ps2_leds != leds) {
-    send_led(ps2_leds);
+    if (send_led(ps2_leds) == 0) {  // keyboard didnt respond
+      isConnected = false;
+      TinyUSBDevice.detach();
+      return;
+    };
     leds = ps2_leds;
   }
   
@@ -126,7 +140,14 @@ void setup() {
   usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
   usb_hid.setStringDescriptor("TinyUSB Keyboard");
   usb_hid.setReportCallback(NULL, hid_report_callback);
-  usb_hid.begin();
+
+  if (!usb_hid.begin()) {
+      #ifdef DEBUG
+      Serial.println("Failed to initialize TinyUSB!");
+      #endif
+      while (1);
+    }
+
 
   Serial.begin(115200);
 
@@ -148,22 +169,14 @@ void setup() {
   #endif
   digitalWrite(LED_BUILTIN, HIGH);
 
-  if (!usb_hid.begin()) {
-    #ifdef DEBUG
-    Serial.println("Failed to initialize TinyUSB!");
-    #endif
-    while (1);
-  }
-
-
-
-  
   pinMode(DAT, INPUT_PULLUP);
   pinMode(CLK, INPUT_PULLUP);
   #ifdef DEBUG
   Serial.println("PS/2 Keyboard Initialized");
   #endif
   multicore_launch_core1(core1_entry);
+  delayMicroseconds(10000);
+  digitalWrite(LED_BUILTIN, LOW);
 }
 
 uint8_t getc(uint8_t (&buffer)[8]) {
@@ -225,17 +238,18 @@ uint8_t oneCount(uint8_t data) {
   return ONE_COUNT_LOOKUP_TABLE[data];
 }
 
-// Function to read a PS/2 scan code (8-bit)
+// read a PS/2 scan code (8-bit)
 uint8_t kb_getc() {
+  // This can hang
     while (digitalRead(CLK) == HIGH);
     while (digitalRead(CLK) == LOW);
 
     uint8_t data = 0;
     
     for (int i = 0; i < 8; i++) {
-        while (digitalRead(CLK) == HIGH); 
+        while (digitalRead(CLK) == HIGH);
         data |= (digitalRead(DAT) << i);  
-        while (digitalRead(CLK) == LOW);  
+        while (digitalRead(CLK) == LOW);
     }
 
     // Parity bit
@@ -251,7 +265,7 @@ uint8_t kb_getc() {
 }
 
 // this hangs for some reason
-void kb_send(uint8_t state) {
+uint8_t kb_send(uint8_t state) {
   pinMode(DAT, OUTPUT);
   pinMode(CLK, OUTPUT);
 
@@ -267,7 +281,7 @@ void kb_send(uint8_t state) {
 
   // 4) Wait for the device to bring the Clock line low. 
   // while (digitalRead(CLK) == HIGH);
-  waitPin(CLK, LOW, 10000);
+  if (!waitPin(CLK, LOW, 10000)) return 1;
 
 
   // Data
@@ -277,11 +291,11 @@ void kb_send(uint8_t state) {
 
     // 6) Wait for the device to bring Clock high.
     // while (digitalRead(CLK) == LOW);
-    waitPin(CLK, HIGH, 10000);
+    if (!waitPin(CLK, HIGH, 10000)) return 1;
 
     // 7) Wait for the device to bring Clock low. 
     // while (digitalRead(CLK) == HIGH);
-    waitPin(CLK, LOW, 10000);
+    if (!waitPin(CLK, LOW, 10000)) return 1;
   }
 
   // Parity bit
@@ -289,10 +303,10 @@ void kb_send(uint8_t state) {
   digitalWrite(DAT, oneCount(state) % 2 ? LOW : HIGH);
   // 6) Wait for the device to bring Clock high.
   // while (digitalRead(CLK) == LOW);
-  waitPin(CLK, HIGH, 10000);
+  if (!waitPin(CLK, HIGH, 10000)) return 1;
   // 7) Wait for the device to bring Clock low. 
   // while (digitalRead(CLK) == HIGH);
-  waitPin(CLK, LOW, 10000);
+  if (!waitPin(CLK, LOW, 10000)) return 1;
   
   // 8) Repeat steps 5-7 for the other seven data bits and the parity bit 
 
@@ -301,24 +315,28 @@ void kb_send(uint8_t state) {
   
   // 10) Wait for the device to bring Data low
   // while (digitalRead(DAT) == HIGH);
-  waitPin(DAT, LOW, 10000);
+  if (!waitPin(DAT, LOW, 10000)) return 1;
 
   // 11) Wait for the device to bring Clock low. 
-  while (digitalRead(CLK) == HIGH);
-  waitPin(CLK, LOW, 10000);
+  // while (digitalRead(CLK) == HIGH); // this was uncommented?
+  if (!waitPin(CLK, LOW, 10000)) return 1;
 
   // 12) Wait for the device to release Data and Clock
-  while (digitalRead(CLK) == LOW && digitalRead(DAT) == LOW);
+  unsigned long start = micros();
+  while (digitalRead(CLK) == LOW && digitalRead(DAT) == LOW) {
+    if ((micros() - start) > 10000) return 1;
+  }
 
+  return 0;
 }
 
 uint8_t send_led(uint8_t data) {
-  kb_send(0xed); // LED command
+  if (kb_send(0xed)) return 0; // LED command
   uint8_t resp = kb_getc();
   if (resp != 0xfa) {
     return resp;
   }
-  kb_send(data); // LED state
+  if (kb_send(data)) return 0; // LED state
   uint8_t resp2 = kb_getc();
   if (resp2 != 0xfa) {
     return resp2;
@@ -394,10 +412,15 @@ uint8_t remove_key(uint8_t code) {
 
 void loop() {
   TinyUSBDevice.task();  // USB background tasks
-  #ifdef DEBUG
-  Serial.println("loop()");
-  #endif
+  // #ifdef DEBUG
+  // Serial.println("loop()");
+  // #endif
+  digitalWrite(LED_BUILTIN, isConnected);
   if (!charReady) return;  // No new char yet
+  if (!isConnected) {
+    reset();
+  }
+  
 
   int64_t value = 0;  
   memcpy(&value, charBuffer, 8);
