@@ -20,6 +20,7 @@ Adafruit_USBD_HID usb_hid;
 
 
 bool isConnected = true;
+bool isUSBConnected = true;
 
 uint8_t const desc_hid_report[] = { TUD_HID_REPORT_DESC_KEYBOARD() };
 
@@ -40,8 +41,7 @@ const uint8_t ONE_COUNT_LOOKUP_TABLE[256] = {
   3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7, 
   3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7, 
   4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8
-};
-
+  };
 const char USB_LOOKUP_NORMAL[256] = {
   0, 66, 0, 62, 60, 58, 59, 69, 0, 67, 65, 63, 61, 43, 53, 0, 0, 0, 0, 0, 0, 20, 30, 0, 0, 0, 29, 22, 4, 26, 31, 0, // 31
   0, 6, 27, 7, 8, 33, 32, 0, 0, 44, 25, 9, 23, 21, 34, 0, 0, 17, 5, 11, 10, 28, 35, 0, 0, 0, 16, 13, 24, 36, 37, 0, // 63
@@ -72,17 +72,48 @@ const char USB_LOOKUP_SPECIAL[256] = {
   /* d0 */  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   /* e0 */  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   /* f0 */  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+  };
 
-};
-
+// A single character can be 8 bytes at max
 uint8_t charBuffer[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+// internal states
 volatile bool charReady = false;
-
-
 uint8_t leds = 0b00000000;
 uint8_t keys[6] = {0, 0, 0, 0, 0, 0};
 uint8_t modifier = 0;
 uint8_t internal_pressed[128] = {};
+
+void reinit() {
+  /* reset all variables */
+  for (int i = 0; i < 8; i++) {
+    charBuffer[i] = 0;
+  }
+  charReady = false;
+  leds = 0b00000000;
+  for (int i = 0; i < 6; i++) {
+    keys[i] = 0;
+  }
+  modifier = 0;
+  for (int i = 0; i < 128; i++) {
+    internal_pressed[i] = 0;
+  }
+}
+
+void setup_hid() {
+  usb_hid.setBootProtocol(HID_ITF_PROTOCOL_KEYBOARD);
+  usb_hid.setPollInterval(2);
+  usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
+  usb_hid.setStringDescriptor("RASPBERRY PI PICO PS/2 TO USB");
+  usb_hid.setReportCallback(NULL, hid_report_callback);
+
+  if (!usb_hid.begin()) {
+      #ifdef DEBUG
+      Serial.println("Failed to initialize TinyUSB!");
+      #endif
+      while (1);
+    }
+}
 
 void hid_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize) {
   (void) report_id;
@@ -111,7 +142,6 @@ void hid_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8
   if (ps2_leds != leds) {
     if (send_led(ps2_leds) == 0) {  // keyboard didnt respond
       isConnected = false;
-      TinyUSBDevice.detach();
       return;
     };
     leds = ps2_leds;
@@ -120,6 +150,7 @@ void hid_report_callback(uint8_t report_id, hid_report_type_t report_type, uint8
   #ifdef DEBUG
   Serial.printf("LED: %d\n", ledIndicator);
   #endif
+
 }
 
 void setup() {
@@ -135,19 +166,7 @@ void setup() {
       TinyUSBDevice.begin(0);
     }
 
-  usb_hid.setBootProtocol(HID_ITF_PROTOCOL_KEYBOARD);
-  usb_hid.setPollInterval(2);
-  usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
-  usb_hid.setStringDescriptor("TinyUSB Keyboard");
-  usb_hid.setReportCallback(NULL, hid_report_callback);
-
-  if (!usb_hid.begin()) {
-      #ifdef DEBUG
-      Serial.println("Failed to initialize TinyUSB!");
-      #endif
-      while (1);
-    }
-
+  setup_hid();
 
   Serial.begin(115200);
 
@@ -411,14 +430,24 @@ uint8_t remove_key(uint8_t code) {
 }
 
 void loop() {
-  TinyUSBDevice.task();  // USB background tasks
+  if (isConnected) {
+    TinyUSBDevice.task(); // USB background tasks
+  }  
   // #ifdef DEBUG
   // Serial.println("loop()");
   // #endif
+
+  if (!isConnected && isUSBConnected) {
+    isUSBConnected = false;
+    TinyUSBDevice.detach();
+  }
+
   digitalWrite(LED_BUILTIN, isConnected);
   if (!charReady) return;  // No new char yet
   if (!isConnected) {
     reset();
+
+    return;
   }
   
 
