@@ -125,7 +125,7 @@ void setup() {
   usb_hid.setPollInterval(2);
   usb_hid.setReportDescriptor(desc_hid_report, sizeof(desc_hid_report));
   usb_hid.setStringDescriptor("TinyUSB Keyboard");
-  // usb_hid.setReportCallback(NULL, hid_report_callback);
+  usb_hid.setReportCallback(NULL, hid_report_callback);
   usb_hid.begin();
 
   Serial.begin(115200);
@@ -250,6 +250,7 @@ uint8_t kb_getc() {
     return data;
 }
 
+// this hangs for some reason
 void kb_send(uint8_t state) {
   pinMode(DAT, OUTPUT);
   pinMode(CLK, OUTPUT);
@@ -392,7 +393,7 @@ uint8_t remove_key(uint8_t code) {
 }
 
 void loop() {
-  // TinyUSBDevice.task();  // Still required for USB background tasks
+  TinyUSBDevice.task();  // USB background tasks
   #ifdef DEBUG
   Serial.println("loop()");
   #endif
